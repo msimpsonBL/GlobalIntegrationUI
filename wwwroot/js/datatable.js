@@ -58,14 +58,15 @@ $(document).ready(function () {
         // Highlight rows based on the value of 'eventName'
         rowCallback: function (row, data) {
 
-            $(row).removeClass('event-green event-yellow event-red');
-
-            if (data.parentEvent.eventName.includes('NewRsiMessagePublishedIntegrationEvent')) {
-                $(row).addClass('event-green');
-            } else if (data.parentEvent.eventName.includes('NewRsiMessageReceivedIntegrationEvent')) {
-                $(row).addClass('event-orange');
-            } else if (data.parentEvent.eventName.includes('NewRsiMessageSubmittedIntegrationEvent')) {
-                $(row).addClass('event-blue');
+            // Ensure that parentEvent exists before trying to access its properties
+            if (data.parentEvent && data.parentEvent.eventName) {
+                if (data.parentEvent.eventName.includes('NewRsiMessagePublishedIntegrationEvent')) {
+                    $(row).addClass('event-green');
+                } else if (data.parentEvent.eventName.includes('NewRsiMessageReceivedIntegrationEvent')) {
+                    $(row).addClass('event-orange');
+                } else if (data.parentEvent.eventName.includes('NewRsiMessageSubmittedIntegrationEvent')) {
+                    $(row).addClass('event-blue');
+                }
             }
         }
     });
@@ -89,9 +90,9 @@ $(document).ready(function () {
                     var formattedEventName = event.eventName ? event.eventName.split('.').pop() : '';
                     // Determine background color based on EventName
                     var headerBackgroundColor = '#93979b'; // Default gray
-                    if (event.eventName.includes('NewRsiMessageReceivedIntegrationEvent')) {
+                    if (event.parentEvent.eventName.includes('NewRsiMessageReceivedIntegrationEvent')) {
                         headerBackgroundColor = '#fd7e14'; // Orange
-                    } else if (event.eventName.includes('NewRsiMessageSubmittedIntegrationEven')) {
+                    } else if (event.parentEvent.eventName.includes('NewRsiMessageSubmittedIntegrationEven')) {
                         headerBackgroundColor = '#007bff'; // Blue
                     }
                     childContent += `
@@ -105,10 +106,10 @@ $(document).ready(function () {
                     <div class="accordion-body">
                         <table class="table table-bordered">
                             <tbody>
-                                <tr><td><strong>Title:</strong></td><td>${event.title}</td></tr>
-                                <tr><td><strong>Author:</strong></td><td>${event.author}</td></tr>
-                                <tr><td><strong>Collection Code:</strong></td><td>${event.collectionCode}</td></tr>
-                                <tr><td><strong>Creation Time:</strong></td><td>${event.creationTime}</td></tr>
+                                <tr><td><strong>Title:</strong></td><td>${event.parentEvent.title}</td></tr>
+                                <tr><td><strong>Author:</strong></td><td>${event.parentEvent.author}</td></tr>
+                                <tr><td><strong>Collection Code:</strong></td><td>${event.parentEvent.collectionCode}</td></tr>
+                                <tr><td><strong>Creation Time:</strong></td><td>${event.parentEvent.creationTime}</td></tr>
                             </tbody>
                         </table>
                     </div>

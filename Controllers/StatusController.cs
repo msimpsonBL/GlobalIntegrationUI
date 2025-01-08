@@ -3,8 +3,6 @@ using Newtonsoft.Json;
 using SystemAdmin.Context;
 using SystemAdmin.Models;
 using System.Linq.Dynamic.Core;
-using Microsoft.Extensions.Primitives;
-using System.Linq;
 
 namespace SystemAdmin.Controllers
 {
@@ -13,22 +11,19 @@ namespace SystemAdmin.Controllers
         private readonly HttpClient _httpClient;
         private readonly IConfiguration _config;
         private readonly string _baseUrl;
-        private readonly AppDbContext _context;
 
         public StatusController(HttpClient httpClient, IConfiguration config, AppDbContext context)
         {
             _httpClient = httpClient;
             _config = config;
             _baseUrl = _config.GetValue<string>("Urls:BaseUrl") ?? "";
-            _context = context;
         }
 
-        public async Task<IActionResult> Index()
+        public IActionResult Index()
         {
-            //var baseUrl = Environment.GetEnvironmentVariable("BASE_URL") ?? "";
+            var baseUrl = Environment.GetEnvironmentVariable("BASE_URL") ?? "";
             ViewData["baseUrl"] = _baseUrl;
-            var events = _context.IntegrationEventLogs?.ToList();
-            return View(events);
+            return View();
         }
 
         [HttpPost]
@@ -36,154 +31,87 @@ namespace SystemAdmin.Controllers
         {
             try
             {
-                int pageSize = 0;
+                // Get parameters from request
                 var request = Request.Form;
-                var draw = Request.Form["draw"].FirstOrDefault();
-                var start = Request.Form["start"].FirstOrDefault();
-                var length = Request.Form["length"].FirstOrDefault();
-                var sortColumnIndex = Request.Form["order[0][column]"].FirstOrDefault();
-                var sortColumn = !string.IsNullOrEmpty(sortColumnIndex)
-                    ? Request.Form["columns[" + sortColumnIndex + "][name]"].FirstOrDefault()
-                    : "CreationTime"; // Default sort column if none is provided
-                var sortColumnDir = Request.Form["order[0][dir]"].FirstOrDefault() ?? "asc";
-                var searchValue = Request.Form["search[value]"].FirstOrDefault();
-
-                // Date range filtering parameters
+                var draw = request["draw"].FirstOrDefault();
+                var start = int.Parse(request["start"].FirstOrDefault() ?? "0");
+                var length = int.Parse(request["length"].FirstOrDefault() ?? "10");
+                var searchValue = request["search[value]"].FirstOrDefault();
                 var startDateStr = request["startDate"].FirstOrDefault();
                 var endDateStr = request["endDate"].FirstOrDefault();
-                DateTime? startDate = string.IsNullOrEmpty(startDateStr) ? (DateTime?)null : DateTime.Parse(startDateStr);
-                DateTime? endDate = string.IsNullOrEmpty(endDateStr) ? (DateTime?)null : DateTime.Parse(endDateStr);
 
-                pageSize = length != null ? int.Parse(length) : 0;
-                int skip = start != null ? int.Parse(start) : 0;
-                //var data = (from items in _context.RsiPostItems select items);
-                var query = _context.IntegrationEventLogs?.AsQueryable();
+                // Sorting parameters
+                var sortColumnIndex = int.Parse(request["order[0][column]"].FirstOrDefault() ?? "0");
+                var sortColumnName = request[$"columns[{sortColumnIndex}][data]"].FirstOrDefault() ?? "ParentEvent.Title";
+                var sortDirection = request["order[0][dir]"].FirstOrDefault() ?? "asc";
 
-                // Apply date range filter
-                if (startDate.HasValue && endDate.HasValue)
+                // Calculate page number for the API (DataTables uses start/length)
+                var pageNumber = (start / length) + 1;
+                // Construct the API URL with query parameters
+                var queryParams = new List<string>
                 {
-                    if (startDate.Value.Date == endDate.Value.Date)
-                    {
-                        // Filter for a specific date
-                        query = query.Where(e => e.CreationTime.Date == startDate.Value.Date);
-                    }
-                    else
-                    {
-                        // Filter for a range of dates
-                        query = query.Where(e => e.CreationTime.Date >= startDate.Value.Date && e.CreationTime.Date <= endDate.Value.Date);
-                    }
-                }
+                    $"pageSize={length}",
+                    $"pageNumber={pageNumber}",
+                    $"sortColumn={Uri.EscapeDataString(sortColumnName)}",
+                    $"sortDirection={Uri.EscapeDataString(sortDirection)}"
+                };
+                if (!string.IsNullOrEmpty(searchValue))
+                    queryParams.Add($"searchTerm={Uri.EscapeDataString(searchValue)}");
 
-                // Client-side deserialization
-                var data = query
-                    .AsEnumerable() // Bring the data into memory
-                    .Select(e =>
-                    {
-                        var content = JsonConvert.DeserializeObject<IntegrationEventContent>(e.Content);
+                if (!string.IsNullOrEmpty(startDateStr))
+                    queryParams.Add($"startDate={Uri.EscapeDataString(startDateStr)}");
 
-                        return new
-                        {
-                            e.EventId,
-                            e.CreationTime,
-                            Identifier = content?.RsiMessage?.Identifier,
-                            CollectionCode = content?.RsiMessage?.CollectionCode,
-                            Author = content?.RsiMessage?.Author,
-                            EventName = e.EventTypeName,
-                            CreationDate = e.CreationTime,
-                            TransactionId = e.TransactionId,
-                            Title = content?.RsiMessage?.Title,
-                            FullContent = e.Content
-                        };
-                    });
-
-                // Group events by Identifier
-                var groupedData = data
-                    .Where(e => e.Identifier != null)
-                    .GroupBy(e => e.Identifier)
+                if (!string.IsNullOrEmpty(endDateStr))
+                    queryParams.Add($"endDate={Uri.EscapeDataString(endDateStr)}");
+                var apiUrl = $"{_baseUrl}/api/getevents?{string.Join("&", queryParams)}";
+                // Make the API call
+                var response = await _httpClient.GetAsync(apiUrl);
+                response.EnsureSuccessStatusCode();
+                // Read and deserialize the response
+                var content = await response.Content.ReadAsStringAsync();
+                var apiResponse = JsonConvert.DeserializeObject<IntegrationEventContent>(content);
+                // Format the response for DataTables
+                var groupedData = apiResponse?.Data
+                    .GroupBy(item => item.Identifier) // Grouping by Identifier
                     .Select(group =>
                     {
-                        // Apply precedence logic
-                        var events = group.ToList();
-                        var parentEvent = events
-                            .OrderBy(e =>
-                                e.EventName.Contains("NewRsiMessagePublishedIntegrationEvent") ? 1 :
-                                e.EventName.Contains("NewRsiMessageReceivedIntegrationEvent") ? 2 :
-                                3) // Published > Received > Submitted
-                            .First();
-
-                        var childEvents = events
-                            .Where(e => e.EventId != parentEvent.EventId)
-                            .OrderBy(e =>
-                                e.EventName.Contains("NewRsiMessageReceivedIntegrationEvent") ? 1 :
-                                2) // Received > Submitted
-                            .ToList();
+                        var parentEvent = group.FirstOrDefault()?.ParentEvent; // Get the ParentEvent
+                        var relatedEvents = group.Skip(1).Select(item => new
+                        {
+                            item.Identifier,
+                            ParentEvent = item.ParentEvent // These are the related events
+                        }).ToList();
 
                         return new
                         {
                             Identifier = group.Key,
                             ParentEvent = parentEvent,
-                            RelatedEvents = childEvents
+                            RelatedEvents = relatedEvents
                         };
-                    })
-                    .ToList();
+                    }).ToList();
 
-                // Apply search filter
-                if (!string.IsNullOrEmpty(searchValue))
-                {
-                    groupedData = groupedData
-                        .Where(e =>
-                            (e.Identifier != null && e.Identifier.Contains(searchValue, StringComparison.OrdinalIgnoreCase)) ||
-                            (e.ParentEvent.CollectionCode != null && e.ParentEvent.CollectionCode.Contains(searchValue, StringComparison.OrdinalIgnoreCase)) ||
-                            (e.ParentEvent.Author != null && e.ParentEvent.Author.Contains(searchValue, StringComparison.OrdinalIgnoreCase)) ||
-                            (e.ParentEvent.Title != null && e.ParentEvent.Title.Contains(searchValue, StringComparison.OrdinalIgnoreCase)) ||
-                            (e.ParentEvent.EventName != null && e.ParentEvent.EventName.Contains(searchValue, StringComparison.OrdinalIgnoreCase)))
-                        .ToList();
-                }
-
-                int totalRecords = groupedData.Count();
-                var pagedData = groupedData.Skip(skip).Take(pageSize).ToList();
-                if (string.IsNullOrEmpty(sortColumn) || !pagedData.Any())
-                {
-                    sortColumn = "CreationTime"; // Default column
-                }
-
-                // Sorting and pagination
-                if (!string.IsNullOrEmpty(sortColumn) && !string.IsNullOrEmpty(sortColumnDir))
-                {
-                    if (sortColumnDir.Equals("asc", StringComparison.OrdinalIgnoreCase))
-                    {
-                        pagedData = pagedData
-                            .OrderBy(e => GetPropertyValue(e.ParentEvent, sortColumn))
-                            .ToList();
-                    }
-                    else if (sortColumnDir.Equals("desc", StringComparison.OrdinalIgnoreCase))
-                    {
-                        pagedData = pagedData
-                            .OrderByDescending(e => GetPropertyValue(e.ParentEvent, sortColumn))
-                            .ToList();
-                    }
-                }
-
-                // Prepare response
+                // Format the response for DataTables
                 var jsonData = new
                 {
-                    draw = draw,
-                    recordsFiltered = totalRecords,
-                    recordsTotal = totalRecords,
-                    data = pagedData
+                    draw = draw ?? "0",
+                    recordsFiltered = apiResponse?.TotalRecords ?? 0,
+                    recordsTotal = apiResponse?.TotalRecords ?? 0,
+                    data = groupedData
                 };
 
                 return new JsonResult(jsonData);
             }
             catch (Exception ex)
             {
-                // Log the exception
-                return StatusCode(500, new { error = ex.Message });
+                return StatusCode(500, new
+                {
+                    error = ex.Message
+                });
             }
         }
 
         [HttpPost]
-        public IActionResult DeleteEvent(string eventId)
+        public async Task<IActionResult> DeleteEvent(string eventId)
         {
             Guid guidValue;
             if (!Guid.TryParse(eventId, out guidValue))
@@ -193,32 +121,18 @@ namespace SystemAdmin.Controllers
 
             try
             {
-                // Find the parent event by EventId
-                var parentEvent = _context.IntegrationEventLogs?.FirstOrDefault(e => e.EventId == guidValue);
-                if (parentEvent == null)
+                // Construct the API URL for deleting the event
+                var apiUrl = $"{_baseUrl}/api/deleteevent/{guidValue}";
+
+                // Make the HTTP DELETE request to the API
+                var response = await _httpClient.DeleteAsync(apiUrl);
+
+                // Check if the response is successful
+                if (!response.IsSuccessStatusCode)
                 {
-                    return Json(new { success = false, message = "Parent event not found." });
+                    var errorMessage = await response.Content.ReadAsStringAsync();
+                    return Json(new { success = false, message = errorMessage });
                 }
-
-                // Deserialize the parent event's content to find the Identifier
-                var content = JsonConvert.DeserializeObject<IntegrationEventContent>(parentEvent.Content);
-                var identifier = content?.RsiMessage?.Identifier;
-
-                if (string.IsNullOrEmpty(identifier))
-                {
-                    return Json(new { success = false, message = "Identifier not found for the parent event." });
-                }
-
-                var eventsToDelete = _context.IntegrationEventLogs?.Where(e => e.Content.Contains($"\"Identifier\": \"{identifier}\"")).ToList();
-
-                if (eventsToDelete == null || !eventsToDelete.Any())
-                {
-                    return Json(new { success = false, message = "No related events found for the given identifier." });
-                }
-
-                // Remove all events with the same Identifier
-                _context.IntegrationEventLogs?.RemoveRange(eventsToDelete);
-                _context.SaveChanges();
 
                 return Json(new { success = true });
             }
@@ -227,11 +141,6 @@ namespace SystemAdmin.Controllers
                 // Log the exception and return an error message
                 return Json(new { success = false, message = ex.Message });
             }
-        }
-
-        object? GetPropertyValue(object obj, string propertyName)
-        {
-            return obj?.GetType()?.GetProperty(propertyName)?.GetValue(obj, null);
         }
     }
 }
