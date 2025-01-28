@@ -60,11 +60,11 @@ $(document).ready(function () {
 
             // Ensure that parentEvent exists before trying to access its properties
             if (data.parentEvent && data.parentEvent.eventName) {
-                if (data.parentEvent.eventName.includes('NewRsiMessagePublishedIntegrationEvent')) {
+                if (data.parentEvent.eventName.includes('NewRsiMessagePublished.IntegrationEvent')) {
                     $(row).addClass('event-green');
-                } else if (data.parentEvent.eventName.includes('NewRsiMessageReceivedIntegrationEvent')) {
+                } else if (data.parentEvent.eventName.includes('NewRsiMessageReceived.IntegrationEvent')) {
                     $(row).addClass('event-orange');
-                } else if (data.parentEvent.eventName.includes('NewRsiMessageSubmittedIntegrationEvent')) {
+                } else if (data.parentEvent.eventName.includes('NewRsiMessageSubmitted.IntegrationEvent')) {
                     $(row).addClass('event-blue');
                 }
             }
@@ -87,12 +87,12 @@ $(document).ready(function () {
             <div class="accordion" id="accordion-${row.index()}">
             `;
                 relatedEvents.forEach(function (event, index) {
-                    var formattedEventName = event.eventName ? event.eventName.split('.').pop() : '';
+                    var formattedEventName = event.parentEvent.eventName ? event.parentEvent.eventName.split('.').slice(0, -1).join('.') : '';
                     // Determine background color based on EventName
                     var headerBackgroundColor = '#93979b'; // Default gray
-                    if (event.parentEvent.eventName.includes('NewRsiMessageReceivedIntegrationEvent')) {
+                    if (event.parentEvent.eventName.includes('NewRsiMessageReceived.IntegrationEvent')) {
                         headerBackgroundColor = '#fd7e14'; // Orange
-                    } else if (event.parentEvent.eventName.includes('NewRsiMessageSubmittedIntegrationEven')) {
+                    } else if (event.parentEvent.eventName.includes('NewRsiMessageSubmitted.IntegrationEven')) {
                         headerBackgroundColor = '#007bff'; // Blue
                     }
                     childContent += `

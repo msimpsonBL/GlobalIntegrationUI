@@ -15,10 +15,11 @@
     public class ParentEvent
     {
         public string EventId { get; set; }
-        public DateTime CreationTime { get; set; }
+        public string CreationTime { get; set; }
         public string CollectionCode { get; set; }
         public string Author { get; set; }
         public string EventName { get; set; }
         public string Title { get; set; }
+        public string Identifier { get; set; }
     }
 }

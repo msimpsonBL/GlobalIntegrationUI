@@ -3,6 +3,7 @@ using Newtonsoft.Json;
 using SystemAdmin.Context;
 using SystemAdmin.Models;
 using System.Linq.Dynamic.Core;
+using SystemAdmin.Helper;
 
 namespace SystemAdmin.Controllers
 {
@@ -11,12 +12,15 @@ namespace SystemAdmin.Controllers
         private readonly HttpClient _httpClient;
         private readonly IConfiguration _config;
         private readonly string _baseUrl;
+        private readonly StatusHubClient _statusHubClient;
 
         public StatusController(HttpClient httpClient, IConfiguration config, AppDbContext context)
         {
             _httpClient = httpClient;
             _config = config;
             _baseUrl = _config.GetValue<string>("Urls:BaseUrl") ?? "";
+            string hubUrl = $"{_baseUrl}/statushub";
+            _statusHubClient = new StatusHubClient(hubUrl);
         }
 
         public IActionResult Index()
@@ -42,7 +46,7 @@ namespace SystemAdmin.Controllers
 
                 // Sorting parameters
                 var sortColumnIndex = int.Parse(request["order[0][column]"].FirstOrDefault() ?? "0");
-                var sortColumnName = request[$"columns[{sortColumnIndex}][data]"].FirstOrDefault() ?? "ParentEvent.Title";
+                var sortColumnName = request[$"columns[{sortColumnIndex}][data]"].FirstOrDefault() ?? "ParentEvent.CreationTime";
                 var sortDirection = request["order[0][dir]"].FirstOrDefault() ?? "asc";
 
                 // Calculate page number for the API (DataTables uses start/length)
@@ -63,13 +67,36 @@ namespace SystemAdmin.Controllers
 
                 if (!string.IsNullOrEmpty(endDateStr))
                     queryParams.Add($"endDate={Uri.EscapeDataString(endDateStr)}");
-                var apiUrl = $"{_baseUrl}/api/getevents?{string.Join("&", queryParams)}";
-                // Make the API call
-                var response = await _httpClient.GetAsync(apiUrl);
-                response.EnsureSuccessStatusCode();
-                // Read and deserialize the response
-                var content = await response.Content.ReadAsStringAsync();
-                var apiResponse = JsonConvert.DeserializeObject<IntegrationEventContent>(content);
+
+                var apiResponse = await _statusHubClient.GetIntegrationEventContentAsync();
+
+                // Apply search functionality (case-insensitive)
+                if (!string.IsNullOrEmpty(searchValue))
+                {
+                    apiResponse.Data = apiResponse.Data
+                        .Where(item =>
+                            (item.Identifier?.Contains(searchValue, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                            (item.ParentEvent?.Title?.Contains(searchValue, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                            (item.ParentEvent?.Author?.Contains(searchValue, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                            (item.ParentEvent?.CollectionCode?.Contains(searchValue, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                            (item.ParentEvent?.CreationTime.Contains(searchValue, StringComparison.OrdinalIgnoreCase) ?? false))
+                        .ToList();
+                }
+
+                // Apply date filters
+                if (DateTime.TryParse(startDateStr, out DateTime startDateTime) &&
+                    DateTime.TryParse(endDateStr, out DateTime endDateTime))
+                {
+                    apiResponse.Data = apiResponse.Data.Where(e =>
+                    {
+                        if (DateTime.TryParse(e.ParentEvent.CreationTime, out DateTime creationTime))
+                        {
+                            return creationTime.Date >= startDateTime.Date && creationTime.Date <= endDateTime.Date;
+                        }
+                        return false; // Exclude entries where CreationTime is not a valid date
+                    }).ToList();
+                }
+
                 // Format the response for DataTables
                 var groupedData = apiResponse?.Data
                     .GroupBy(item => item.Identifier) // Grouping by Identifier
@@ -90,13 +117,22 @@ namespace SystemAdmin.Controllers
                         };
                     }).ToList();
 
+                // Apply sorting to the grouped data
+                groupedData = (sortDirection == "asc"
+                    ? groupedData.OrderBy(item => GetPropertyValue(item, sortColumnName))
+                    : groupedData.OrderByDescending(item => GetPropertyValue(item, sortColumnName)))
+                    .ToList();
+
+                // Apply pagination
+                var paginatedData = groupedData.Skip(start).Take(length).ToList();
+
                 // Format the response for DataTables
                 var jsonData = new
                 {
                     draw = draw ?? "0",
                     recordsFiltered = apiResponse?.TotalRecords ?? 0,
                     recordsTotal = apiResponse?.TotalRecords ?? 0,
-                    data = groupedData
+                    data = paginatedData
                 };
 
                 return new JsonResult(jsonData);
@@ -111,27 +147,18 @@ namespace SystemAdmin.Controllers
         }
 
         [HttpPost]
-        public async Task<IActionResult> DeleteEvent(string eventId)
+        public async Task<IActionResult> DeleteEvent(Guid eventId)
         {
-            Guid guidValue;
-            if (!Guid.TryParse(eventId, out guidValue))
-            {
-                return Json(new { success = false, message = "Invalid EventId." });
-            }
-
             try
             {
-                // Construct the API URL for deleting the event
-                var apiUrl = $"{_baseUrl}/api/deleteevent/{guidValue}";
-
                 // Make the HTTP DELETE request to the API
-                var response = await _httpClient.DeleteAsync(apiUrl);
+                var response = await _statusHubClient.DeleteEventAsync(eventId);
 
                 // Check if the response is successful
-                if (!response.IsSuccessStatusCode)
+                if (!response)
                 {
-                    var errorMessage = await response.Content.ReadAsStringAsync();
-                    return Json(new { success = false, message = errorMessage });
+                    //var errorMessage = await response.Content.ReadAsStringAsync();
+                    return Json(new { success = false, message = "Invalid data" });
                 }
 
                 return Json(new { success = true });
@@ -141,6 +168,32 @@ namespace SystemAdmin.Controllers
                 // Log the exception and return an error message
                 return Json(new { success = false, message = ex.Message });
             }
+        }
+
+        private static object GetPropertyValue(object obj, string propertyName)
+        {
+            if (obj == null || string.IsNullOrEmpty(propertyName))
+                return null;
+
+            // Split the property path by '.'
+            var propertyNames = propertyName.Split('.');
+
+            foreach (var name in propertyNames)
+            {
+                if (obj == null) return null;
+
+                // Get all properties of the object
+                var property = obj.GetType()
+                                  .GetProperties()
+                                  .FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
+
+                if (property == null) return null;
+
+                // Get the value of the property
+                obj = property.GetValue(obj, null);
+            }
+
+            return obj;
         }
     }
 }
